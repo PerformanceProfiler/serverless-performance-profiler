@@ -1,0 +1,210 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless Performance Profiler Backend
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: nodejs18.x
+    Environment:
+      Variables:
+        METRICS_TABLE: !Ref MetricsTable
+        ALERTS_TABLE: !Ref AlertsTable
+        SNS_TOPIC_ARN: !Ref AlertsTopic
+Resources:
+  # DynamoDB Table for Metrics
+  MetricsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ProfilerMetrics
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  # DynamoDB Table for Alert Configurations
+  AlertsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ProfilerAlerts
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: alertId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: alertId
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  # Lambda Function to Fetch Metrics
+  GetMetricsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: getMetrics.handler
+      CodeUri: ./functions/getMetrics
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - cloudwatch:GetMetricData
+                - cloudwatch:ListMetrics
+                - sts:AssumeRole
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:Query
+              Resource: !GetAtt MetricsTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /metrics
+            Method: GET
+            RestApiId: !Ref ProfilerApi
+
+  # Lambda Function to Generate Insights
+  GenerateInsightsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: generateInsights.handler
+      CodeUri: ./functions/generateInsights
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:PutItem
+              Resource: !GetAtt MetricsTable.Arn
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+
+  # Lambda Function to Check Alerts
+  CheckAlertsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: checkAlerts.handler
+      CodeUri: ./functions/checkAlerts
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:Query
+              Resource:
+                - !GetAtt MetricsTable.Arn
+                - !GetAtt AlertsTable.Arn
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref AlertsTopic
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+
+  # Lambda Function for Authentication
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: auth.handler
+      CodeUri: ./functions/auth
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:SignUp
+                - cognito-idp:AdminInitiateAuth
+                - cognito-idp:AdminConfirmSignUp
+              Resource: !GetAtt UserPool.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /auth/{proxy+}
+            Method: ANY
+            RestApiId: !Ref ProfilerApi
+
+  # API Gateway
+  ProfilerApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: ProfilerUsers
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireNumbers: true
+
+  # Cognito User Pool Client
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: ProfilerWebClient
+      GenerateSecret: false
+      AllowedOAuthFlows:
+        - implicit
+      AllowedOAuthScopes:
+        - openid
+        - email
+      CallbackURLs:
+        - http://localhost:3000
+        - https://app.perfprofiler.com
+      SupportedIdentityProviders:
+        - COGNITO
+
+  # SNS Topic for Alerts
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ProfilerAlerts
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ProfilerApi}.execute-api.${AWS::Region}.amazonaws.com/prod/"
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
