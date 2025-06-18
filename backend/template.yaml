@@ -8,7 +8,6 @@ Globals:
     Runtime: nodejs18.x
     Environment:
       Variables:
-        APP_REGION: "ap-south-1"
         METRICS_TABLE: !Ref MetricsTable
         ALERTS_TABLE: !Ref AlertsTable
         SNS_TOPIC_ARN: !Ref AlertsTopic
@@ -72,7 +71,6 @@ Resources:
       BillingMode: PAY_PER_REQUEST
 
   
-
   # Lambda Function to Fetch Metrics
   GetMetricsFunction:
     Type: AWS::Serverless::Function
@@ -89,6 +87,7 @@ Resources:
                 - cloudwatch:ListMetrics
                 - logs:FilterLogEvents
                 - sts:AssumeRole
+                - lambda:GetFunctionConfiguration
               Resource: '*'
             - Effect: Allow
               Action:

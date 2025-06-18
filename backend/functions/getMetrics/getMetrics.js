@@ -2,9 +2,10 @@ const { CloudWatchClient, GetMetricDataCommand } = require('@aws-sdk/client-clou
 const { CloudWatchLogsClient, FilterLogEventsCommand } = require('@aws-sdk/client-cloudwatch-logs');
 const { DynamoDBClient, GetItemCommand, PutItemCommand } = require('@aws-sdk/client-dynamodb');
 const { STSClient, AssumeRoleCommand } = require('@aws-sdk/client-sts');
+const { LambdaClient, GetFunctionConfigurationCommand } = require('@aws-sdk/client-lambda');
 
 // Initialize DynamoDB client for application tables
-const ddbClient = new DynamoDBClient({ region: process.env.APP_REGION });
+const ddbClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 // Lambda pricing constants (us-east-1, 2025)
 const FALLBACK_INVOCATION_COST = 0.0000002; // $0.20/million
 const FALLBACK_DURATION_COST_PER_GB_SECOND = 0.00001667; // $0.00001667/GB-second
@@ -58,7 +59,7 @@ exports.handler = async (event) => {
         Key: { userId: { S: userId } },
       }));
       roleArn = Item?.roleArn?.S;
-      userRegion = Item?.region?.S || process.env.APP_REGION; // Fallback to APP_REGION
+      userRegion = Item?.region?.S || process.env.AWS_REGION; // Fallback to application's region
     } catch (error) {
       console.error('DynamoDB GetItem error:', error);
       throw new Error('Failed to fetch user configuration');
@@ -92,6 +93,14 @@ exports.handler = async (event) => {
       RoleArn: roleArn,
       RoleSessionName: `ProfilerSession-${userId}`,
     }));
+    const lambdaClient = new LambdaClient({
+      credentials: {
+        accessKeyId: Credentials.AccessKeyId,
+        secretAccessKey: Credentials.SecretAccessKey,
+        sessionToken: Credentials.SessionToken,
+      },
+      region: userRegion,
+    });
     const userCwClient = new CloudWatchClient({
       credentials: {
         accessKeyId: Credentials.AccessKeyId,
@@ -172,12 +181,21 @@ exports.handler = async (event) => {
       }
 
       // Extract metrics
+      let memoryMB = 128; // Fallback value
+      try {
+        const { Configuration } = await lambdaClient.send(new GetFunctionConfigurationCommand({
+          FunctionName: fn,
+        }));
+        memoryMB = Configuration.MemorySize || 128;
+      } catch (error) {
+        console.warn(`Failed to fetch memory for ${fn}, using fallback:`, error.message);
+      }
+      const memoryGB = memoryMB / 1024;
+      
       const latency = metricData.MetricDataResults.find((r) => r.Id === `latency${i}`)?.Values[0] || 0;
       const errors = metricData.MetricDataResults.find((r) => r.Id === `errors${i}`)?.Values[0] || 0;
       const invocations = metricData.MetricDataResults.find((r) => r.Id === `invocations${i}`)?.Values[0] || 0;
 
-      // Assume 128MB memory for cost calculation (fetch actual memory post-MVP)
-      const memoryGB = 128 / 1024; // 128MB in GB
       const durationSeconds = (latency / 1000) * invocations; // Total seconds
       const cost = (invocations * INVOCATION_COST) + (durationSeconds * memoryGB * DURATION_COST_PER_GB_SECOND);
 
@@ -193,10 +211,11 @@ exports.handler = async (event) => {
           invocations: { N: invocations.toString() },
           coldStarts: { N: coldStarts.toString() },
           cost: { N: cost.toFixed(6) },
+          memoryMB: { N: memoryMB.toString() },
         },
       }));
 
-      return { functionName: fn, latency, errors, invocations, coldStarts, cost: parseFloat(cost.toFixed(6)) };
+      return { functionName: fn, latency, errors, invocations, coldStarts, cost: parseFloat(cost.toFixed(6)), memoryMB };
     }));
 
     // Return response for dashboard
