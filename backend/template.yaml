@@ -12,6 +12,18 @@ Globals:
         ALERTS_TABLE: !Ref AlertsTable
         SNS_TOPIC_ARN: !Ref AlertsTopic
 Resources:
+  ProfilerUsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ProfilerUsers
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
   # DynamoDB Table for Metrics
   MetricsTable:
     Type: AWS::DynamoDB::Table
@@ -46,6 +58,8 @@ Resources:
           KeyType: RANGE
       BillingMode: PAY_PER_REQUEST
 
+  
+
   # Lambda Function to Fetch Metrics
   GetMetricsFunction:
     Type: AWS::Serverless::Function
@@ -60,13 +74,17 @@ Resources:
               Action:
                 - cloudwatch:GetMetricData
                 - cloudwatch:ListMetrics
+                - logs:FilterLogEvents
                 - sts:AssumeRole
               Resource: '*'
             - Effect: Allow
               Action:
                 - dynamodb:PutItem
                 - dynamodb:Query
-              Resource: !GetAtt MetricsTable.Arn
+                - dynamodb:GetItem
+              Resource:
+                - !GetAtt MetricsTable.Arn
+                - !GetAtt ProfilerUsersTable.Arn
       Events:
         Api:
           Type: Api
@@ -74,6 +92,10 @@ Resources:
             Path: /metrics
             Method: GET
             RestApiId: !Ref ProfilerApi
+      Environment:
+        Variables:
+          IS_LOCAL:
+          METRICS_TABLE:
 
   # Lambda Function to Generate Insights
   GenerateInsightsFunction:

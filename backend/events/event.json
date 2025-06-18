@@ -2,20 +2,13 @@
   "httpMethod": "GET",
   "path": "/metrics",
   "queryStringParameters": {
-    "functionNames": "my-function,api-handler",
+    "functionNames": "test-function",
     "startTime": "2025-06-17T00:00:00Z",
     "endTime": "2025-06-17T23:59:59Z"
   },
-  "headers": {
-    "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-  },
+  "headers": { "Authorization": "Bearer dummy-token" },
   "requestContext": {
-    "authorizer": {
-      "claims": {
-        "sub": "user123",
-        "email": "alex@example.com"
-      }
-    }
+    "authorizer": { "claims": { "sub": "user123", "email": "alex@example.com" } }
   },
   "body": null
 }

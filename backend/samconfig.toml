@@ -16,6 +16,11 @@ lint = true
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 resolve_s3 = true
+stack_name = "serverless-profiler"
+s3_prefix = "serverless-profiler"
+region = "ap-south-1"
+disable_rollback = true
+image_repositories = []
 
 [default.package.parameters]
 resolve_s3 = true
