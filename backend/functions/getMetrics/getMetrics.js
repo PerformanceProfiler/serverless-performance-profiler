@@ -3,15 +3,11 @@ const { CloudWatchLogsClient, FilterLogEventsCommand } = require('@aws-sdk/clien
 const { DynamoDBClient, GetItemCommand, PutItemCommand } = require('@aws-sdk/client-dynamodb');
 const { STSClient, AssumeRoleCommand } = require('@aws-sdk/client-sts');
 
-// Initialize clients (default region, overridden by STS credentials)
-const cwClient = new CloudWatchClient({ region: 'us-east-1' });
-const logsClient = new CloudWatchLogsClient({ region: 'us-east-1' });
-const ddbClient = new DynamoDBClient({ region: 'us-east-1' });
-const stsClient = new STSClient({ region: 'us-east-1' });
-
+// Initialize DynamoDB client for application tables
+const ddbClient = new DynamoDBClient({ region: process.env.APP_REGION });
 // Lambda pricing constants (us-east-1, 2025)
-const INVOCATION_COST = 0.0000002; // $0.20/million
-const DURATION_COST_PER_GB_SECOND = 0.00001667; // $0.00001667/GB-second
+const FALLBACK_INVOCATION_COST = 0.0000002; // $0.20/million
+const FALLBACK_DURATION_COST_PER_GB_SECOND = 0.00001667; // $0.00001667/GB-second
 
 exports.handler = async (event) => {
   try {
@@ -33,8 +29,11 @@ exports.handler = async (event) => {
       ? Math.floor(new Date(event.queryStringParameters.endTime).getTime() / 1000)
       : Math.floor(Date.now() / 1000);
 
+    let invocationCost, durationCostPerGBSecond;
     // Mock response for local testing
     if (process.env.IS_LOCAL) {
+      invocationCost = FALLBACK_INVOCATION_COST;
+      durationCostPerGBSecond = FALLBACK_DURATION_COST_PER_GB_SECOND;
       const metrics = functionNames.map((fn) => ({
         functionName: fn,
         latency: 300,
@@ -51,17 +50,44 @@ exports.handler = async (event) => {
       };
     }
 
-    // Fetch user’s IAM role ARN from DynamoDB
-    const { Item } = await ddbClient.send(new GetItemCommand({
-      TableName: 'ProfilerUsers', // Assumes a table for user configs (create in SAM template)
-      Key: { userId: { S: userId } },
-    }));
-    const roleArn = Item?.roleArn?.S;
+    // Fetch user’s IAM role ARN and region from ProfilerUsers
+    let roleArn, userRegion;
+    try {
+      const { Item } = await ddbClient.send(new GetItemCommand({
+        TableName: 'ProfilerUsers',
+        Key: { userId: { S: userId } },
+      }));
+      roleArn = Item?.roleArn?.S;
+      userRegion = Item?.region?.S || process.env.APP_REGION; // Fallback to APP_REGION
+    } catch (error) {
+      console.error('DynamoDB GetItem error:', error);
+      throw new Error('Failed to fetch user configuration');
+    }
     if (!roleArn) {
       return { statusCode: 400, body: JSON.stringify({ error: 'No IAM role configured' }) };
     }
 
+    // Fetch region-specific pricing
+    try {
+      const { Item } = await ddbClient.send(new GetItemCommand({
+        TableName: 'PricingConfig',
+        Key: { region: { S: userRegion } },
+      }));
+      invocationCost = parseFloat(Item?.invocationCost?.S) || FALLBACK_INVOCATION_COST;
+      durationCostPerGBSecond = parseFloat(Item?.durationCostPerGBSecond?.S) || FALLBACK_DURATION_COST_PER_GB_SECOND;
+      if (isNaN(invocationCost) || isNaN(durationCostPerGBSecond)) {
+        console.warn('Invalid pricing data, using fallbacks');
+        invocationCost = FALLBACK_INVOCATION_COST;
+        durationCostPerGBSecond = FALLBACK_DURATION_COST_PER_GB_SECOND;
+      }
+    } catch (error) {
+      console.warn('PricingConfig error, using fallbacks:', error);
+      invocationCost =FALLBACK_INVOCATION_COST;
+      durationCostPerGBSecond = FALLBACK_DURATION_COST_PER_GB_SECOND;
+    }
+
     // Assume user’s IAM role via STS
+    const stsClient = new STSClient({ region: userRegion });
     const { Credentials } = await stsClient.send(new AssumeRoleCommand({
       RoleArn: roleArn,
       RoleSessionName: `ProfilerSession-${userId}`,
@@ -72,6 +98,7 @@ exports.handler = async (event) => {
         secretAccessKey: Credentials.SecretAccessKey,
         sessionToken: Credentials.SessionToken,
       },
+      region: userRegion, // Use user’s region
     });
     const userLogsClient = new CloudWatchLogsClient({
       credentials: {
@@ -79,6 +106,7 @@ exports.handler = async (event) => {
         secretAccessKey: Credentials.SecretAccessKey,
         sessionToken: Credentials.SessionToken,
       },
+      region: userRegion, // Use user’s region
     });
 
     // Fetch CloudWatch metrics
